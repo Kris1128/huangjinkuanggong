@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>单词黄金矿工 - 互动优化版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: linear-gradient(135deg, #87CEEB, #98D8E8, #C4A96A);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Comic Sans MS', 'Arial Rounded MT Bold', sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  #ui-bar {
+    width: 100%; max-width: 900px;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 20px;
+    background: rgba(44, 62, 80, 0.85);
+    border-radius: 15px 15px 0 0;
+    margin-top: 20px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+    color: white;
+  }
+  .score-box { color: #f1c40f; font-size: 24px; font-weight: bold; }
+  .level-box { color: #2ecc71; font-size: 20px; font-weight: bold; }
+  .target-box { color: #e74c3c; font-size: 26px; font-weight: bold; text-shadow: 2px 2px 2px rgba(0,0,0,0.6); }
+  .btn {
+    border: none; border-radius: 50px; padding: 8px 20px;
+    font-size: 16px; cursor: pointer; font-weight: bold;
+    transition: all 0.1s; box-shadow: 0 4px 0 rgba(0,0,0,0.3);
+  }
+  .btn:active { transform: translateY(4px); box-shadow: none; }
+  #speak-btn { background: #3498db; color: white; }
+  #next-btn { background: #2ecc71; color: white; display: none; }
+  #game-area {
+    position: relative; border: 10px solid #5d4037;
+    border-radius: 0 0 10px 10px; background: #000;
+    box-shadow: 0 15px 40px rgba(0,0,0,0.4); margin-bottom: 15px;
+  }
+  canvas { display: block; }
+  #message {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 44px; font-weight: bold; color: #fff;
+    text-shadow: 0 4px 12px rgba(0,0,0,0.9);
+    pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 10;
+  }
+  #message.show { opacity: 1; }
+  #controls { margin-top: 10px; display: flex; gap: 15px; align-items: center; }
+  #launch-btn {
+    background: #e74c3c; color: white;
+    padding: 16px 45px; font-size: 24px; box-shadow: 0 6px 0 #c0392b;
+  }
+  #launch-btn:disabled { background: #95a5a6; box-shadow: 0 6px 0 #7f8c8d; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div id="ui-bar">
+  <div class="score-box">得分: <span id="score">0</span></div>
+  <div class="level-box">第 <span id="level">1</span> / 5 关</div>
+  <div class="target-box">抓住 <span id="target-word">mugwort</span>!</div>
+  <button id="speak-btn" class="btn">朗读</button>
+</div>
+<div id="game-area">
+  <canvas id="game-canvas" width="800" height="500"></canvas>
+  <div id="message"></div>
+</div>
+<div id="controls">
+  <button id="launch-btn" class="btn">放钩子 (空格)</button>
+  <button id="next-btn" class="btn">下一关</button>
+</div>
+<script>
+const canvas = document.getElementById('game-canvas');
+const ctx = canvas.getContext('2d');
+const msgEl = document.getElementById('message');
+const launchBtn = document.getElementById('launch-btn');
+const nextBtn = document.getElementById('next-btn');
+const speakBtn = document.getElementById('speak-btn');
+
+const WORDS = ['mugwort', 'face', 'hair', 'feet', 'knees'];
+const BOMB_WORDS = ['trap', 'bomb'];
+
+let score = 0, level = 0;
+let hookAngle = Math.PI / 2, hookLength = 60;
+let hookState = 'swing'; // swing, launch, retract
+let items = [];
+let flash = 0;
+let swingDir = 1;
+
+function getTargetWord() { return WORDS[level]; }
+
+// 每关只生成一次布局：干扰词与炸弹固定位置，抓到不重排
+function generateLevel() {
+  items = [];
+  let occupied = [];
+  const addWord = (word, isBomb) => {
+    let pos;
+    for(let i = 0; i < 120; i++) {
+      let x = 80 + Math.random() * 640;
+      let y = 280 + Math.random() * 180;
+      let overlap = occupied.some(p => Math.hypot(p.x - x, p.y - y) < 140);
+      if (!overlap) { pos = {x, y}; break; }
+    }
+    if(!pos) pos = {x: 400, y: 400};
+    occupied.push(pos);
+    items.push({ word, x: pos.x, y: pos.y, isBomb, visible: true, angleOffset: Math.random() * Math.PI * 2 });
+  };
+  addWord(WORDS[level], false);
+  addWord(BOMB_WORDS[0], true);
+  addWord(BOMB_WORDS[1], true);
+  let others = WORDS.filter(w => w !== WORDS[level]).sort(() => 0.5 - Math.random()).slice(0, 2);
+  others.forEach(w => addWord(w, false));
+}
+
+function update() {
+  if (flash > 0) flash--;
+  if (hookState === 'swing') {
+    let speed = 0.035;
+    hookAngle += speed * swingDir;
+    if (hookAngle >= Math.PI * 5 / 6 || hookAngle <= Math.PI / 6) swingDir *= -1;
+  } else if (hookState === 'launch') {
+    hookLength += 10;
+    const tipX = 400 + Math.cos(hookAngle) * hookLength;
+    const tipY = 60 + Math.sin(hookAngle) * hookLength;
+    for (let item of items) {
+      if (item.visible && Math.hypot(item.x - tipX, item.y - tipY) < 45) {
+        item.visible = false;   // 直接抓走，不动其它单词
+        handleCatch(item);
+        return;
+      }
+    }
+    if (hookLength > 460) hookState = 'retract';
+  } else if (hookState === 'retract') {
+    hookLength -= 15;
+    if (hookLength <= 60) {
+      hookLength = 60;
+      hookState = 'swing';
+      // 收回后若还没过关，继续可抓
+      if (getTargetWord() && items.some(i => i.visible && i.word === getTargetWord())) {
+        launchBtn.disabled = false;
+      } else {
+        launchBtn.disabled = false;
+      }
+    }
+  }
+}
+
+function handleCatch(item) {
+  hookState = 'retract';
+  if (item.isBomb) {
+    showMessage('炸弹 (0分)', '#ecf0f1');
+    playSound(150, 'sawtooth');
+  } else if (item.word === getTargetWord()) {
+    score += 100;
+    document.getElementById('score').innerText = score;
+    showMessage('完美! +100', '#f1c40f');
+    flash = 25;
+    playSound(600, 'sine');
+    launchBtn.disabled = true;
+    nextBtn.style.display = 'inline-block';
+  } else {
+    showMessage('清走干扰词 (0分)', '#bdc3c7');
+    playSound(200, 'triangle');
+    // 不重排：其余单词留在原位，钩子收回后继续抓目标词
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#87CEEB'; ctx.fillRect(0, 0, 800, 220);
+  ctx.fillStyle = '#d2b48c'; ctx.fillRect(0, 220, 800, 280);
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 2;
+  for(let i=0; i<850; i+=40) { ctx.beginPath(); ctx.moveTo(i, 220); ctx.lineTo(i-100, 500); ctx.stroke(); }
+
+  items.forEach(item => {
+    if (!item.visible) return;
+    const bob = Math.sin(Date.now() / 400 + item.angleOffset) * 6;
+    const y = item.y + bob;
+    ctx.save();
+    if (item.isBomb) {
+      const grad = ctx.createRadialGradient(item.x-10, y-10, 5, item.x, y, 35);
+      grad.addColorStop(0, '#444'); grad.addColorStop(1, '#111');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(item.x, y, 35, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(item.x-12, y-12); ctx.lineTo(item.x+12, y+12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(item.x+12, y-12); ctx.lineTo(item.x-12, y+12); ctx.stroke();
+    } else {
+      const grad = ctx.createRadialGradient(item.x-10, y-10, 5, item.x, y, 35);
+      grad.addColorStop(0, '#fff9c4'); grad.addColorStop(0.5, '#f1c40f'); grad.addColorStop(1, '#f39c12');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(item.x, y, 35, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.fillStyle = item.isBomb ? '#e74c3c' : '#5d4037';
+    ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(item.word, item.x, y);
+    ctx.restore();
+  });
+
+  const tipX = 400 + Math.cos(hookAngle) * hookLength;
+  const tipY = 60 + Math.sin(hookAngle) * hookLength;
+  ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(400, 60); ctx.lineTo(tipX, tipY); ctx.stroke();
+  ctx.lineWidth = 5; ctx.strokeStyle = '#333';
+  ctx.beginPath(); ctx.moveTo(tipX, tipY); ctx.lineTo(tipX-12, tipY+18); ctx.moveTo(tipX, tipY); ctx.lineTo(tipX+12, tipY+18); ctx.stroke();
+  ctx.fillStyle = '#8b4513'; ctx.beginPath(); ctx.arc(400, 60, 15, 0, Math.PI*2); ctx.fill();
+
+  if (flash > 0) { ctx.fillStyle = 'rgba(255, 215, 0, ' + (flash/30) + ')'; ctx.fillRect(0, 0, 800, 500); }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+function showMessage(text, color) {
+  msgEl.innerText = text; msgEl.style.color = color;
+  msgEl.classList.add('show');
+  setTimeout(() => msgEl.classList.remove('show'), 1100);
+}
+
+function playSound(freq, type) {
+  type = type || 'sine';
+  try {
+    const a = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = a.createOscillator(); const gain = a.createGain();
+    osc.connect(gain); gain.connect(a.destination);
+    osc.frequency.value = freq; osc.type = type;
+    gain.gain.setValueAtTime(0.15, a.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, a.currentTime + 0.3);
+    osc.start(); osc.stop(a.currentTime + 0.3);
+  } catch(e) {}
+}
+
+function speakWord() {
+  const u = new SpeechSynthesisUtterance(getTargetWord());
+  u.lang = 'en-US'; u.rate = 0.8;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+function nextLevel() {
+  level++;
+  if (level >= WORDS.length) {
+    alert('恭喜通关! 总得分: ' + score);
+    level = 0; score = 0;
+    document.getElementById('score').innerText = '0';
+  }
+  document.getElementById('level').innerText = level + 1;
+  document.getElementById('target-word').innerText = getTargetWord();
+  nextBtn.style.display = 'none';
+  launchBtn.disabled = false;
+  generateLevel();
+}
+
+window.addEventListener('keydown', (e) => { if(e.code==='Space' && hookState==='swing' && !launchBtn.disabled) launch(); });
+canvas.addEventListener('click', () => { if (hookState==='swing' && !launchBtn.disabled) launch(); });
+launchBtn.addEventListener('click', launch);
+speakBtn.addEventListener('click', speakWord);
+nextBtn.addEventListener('click', nextLevel);
+
+function launch() { hookState = 'launch'; launchBtn.disabled = true; }
+
+generateLevel();
+loop();
+</script>
+</body>
+</html>
